@@ -15,6 +15,26 @@
 
 Hyprland is a 100% independent, dynamic tiling Wayland compositor that doesn't sacrifice on its looks.
 
+## Anland / Droidspaces
+
+This fork contains the Anland backend and the matching patched Aquamarine
+source under `aquamarine-0.14.0/`. It produces ARM64 Ubuntu packages for the
+Ubuntu 26.04/resolute Droidspaces rootfs. Debian/unstable repositories are
+explicitly rejected by the build and install scripts:
+
+```sh
+sudo apt-get update
+sudo apt-get install --no-install-recommends build-essential devscripts \
+  debhelper fakeroot quilt sudo
+./build-anland.sh
+```
+
+The build writes the packages and checksums to `artifacts/`. Install the
+resulting set with `artifacts/install-anland-desktop.sh` inside the ARM64
+rootfs. The session launcher invokes `start-hyprland --anland`, which selects
+the Anland Aquamarine backend and uses `ANLAND_SOCKET=/run/display.sock` by
+default.
+
 It provides the latest Wayland features, is highly customizable, has all the eyecandy, the most powerful plugins,
 easy IPC, much more QoL stuff than other compositors and more...
 <br>

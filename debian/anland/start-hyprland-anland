@@ -5,6 +5,15 @@
 
 set -eu
 
+command -v dms >/dev/null 2>&1 || {
+    echo "start-hyprland-anland: dms is not installed" >&2
+    exit 2
+}
+if ! command -v quickshell >/dev/null 2>&1 && ! command -v qs >/dev/null 2>&1; then
+    echo "start-hyprland-anland: quickshell is not installed" >&2
+    exit 2
+fi
+
 runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export XDG_RUNTIME_DIR="$runtime"
 mkdir -p "$XDG_RUNTIME_DIR"
@@ -211,12 +220,11 @@ for instance_dir in "$XDG_RUNTIME_DIR"/hypr/*; do
 ${instance_dir##*/}"
 done
 
-/usr/bin/start-hyprland --anland "$@" &
+# start-hyprland parses its own options before `--`; only arguments after the
+# separator are forwarded to the compositor. The Anland flag must therefore be
+# passed as `-- --anland`.
+/usr/bin/start-hyprland -- --anland "$@" &
 hyprland_pid=$!
-if command -v dms >/dev/null 2>&1; then
-    start_dms &
-    children="$children $!"
-else
-    echo "start-hyprland-anland: official dms package is unavailable; starting compositor only" >&2
-fi
+start_dms &
+children="$children $!"
 wait "$hyprland_pid"

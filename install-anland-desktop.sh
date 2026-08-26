@@ -1,10 +1,10 @@
 #!/bin/sh
-# Configure the official AvengeMedia repositories and install a downloaded
+# Configure the official AvengeMedia Ubuntu PPAs and install a downloaded
 # Anland Hyprland artifact set. Run from the artifact directory, or pass it as
 # the first argument:
-#   ./install-anland-desktop.sh /path/to/anland-debian-packages-arm64
-# The artifact contains only locally built Hyprland-side packages. DMS and the
-# complete official runtime are resolved from AvengeMedia/Debian APT sources.
+#   ./install-anland-desktop.sh /path/to/anland-ubuntu-packages-arm64
+# The artifact contains the locally built Hyprland/Aquamarine/Xwayland packages.
+# DMS and Quickshell are resolved from the Ubuntu-native AvengeMedia PPAs.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -12,7 +12,24 @@ artifact_dir=${1:-$script_dir}
 artifact_dir=$(CDPATH= cd -- "$artifact_dir" && pwd)
 
 if [ "$(dpkg --print-architecture)" != arm64 ]; then
-    echo "install-anland-desktop: this artifact set requires an arm64 Debian system" >&2
+    echo "install-anland-desktop: this artifact set requires an arm64 Ubuntu system" >&2
+    exit 2
+fi
+
+if [ "${ID:-}" = "" ] && [ -r /etc/os-release ]; then
+    . /etc/os-release
+fi
+if [ "${ID:-}" != ubuntu ] || [ "${VERSION_CODENAME:-}" != resolute ]; then
+    echo "install-anland-desktop: this installer requires Ubuntu 26.04 (resolute) arm64" >&2
+    exit 2
+fi
+
+# Never mix Debian/OBS repositories into the Droidspaces Ubuntu rootfs. This
+# also catches the old Debian_Unstable sources created by earlier revisions of
+# this installer before apt is allowed to resolve DMS dependencies.
+if grep -RqsE '(^|[[:space:]/])debian([./:]|$)|Debian_Unstable' \
+        /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+    echo "install-anland-desktop: Debian repositories detected; remove them before continuing" >&2
     exit 2
 fi
 
@@ -29,6 +46,10 @@ find_one() {
 hyprland_deb=$(find_one 'hyprland_*_arm64.deb')
 desktop_deb=$(find_one 'hyprland-anland-desktop_*_arm64.deb')
 aquamarine_deb=$(find_one 'libaquamarine13_*_arm64.deb')
+hyprutils_deb=$(find_one 'libhyprutils13_*_arm64.deb')
+hyprutils_dev_deb=$(find_one 'libhyprutils-dev_*_arm64.deb')
+hyprgraphics_deb=$(find_one 'libhyprgraphics4_*_arm64.deb')
+hyprgraphics_dev_deb=$(find_one 'libhyprgraphics-dev_*_arm64.deb')
 xwayland_deb=$(find_one 'xwayland_*_arm64.deb')
 
 
@@ -39,56 +60,50 @@ if [ -f "$artifact_dir/SHA256SUMS" ]; then
     )
 fi
 
-# DMS itself is from the dms repository; its DankLinux runtime components
-# (including danksearch, dgop and matugen) are from the second repository.
+# DMS itself is from the Ubuntu dms PPA; its DankLinux runtime components
+# (including Quickshell, danksearch and matugen) are from the Ubuntu
+# danklinux PPA. Do not use the Debian_Unstable OBS repositories.
 sudo env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates curl
-sudo install -d -m 0755 /etc/apt/keyrings
-sudo curl --fail --location --retry 3 \
-    --output /etc/apt/keyrings/avengemedia-dms.asc \
-    https://download.opensuse.org/repositories/home:/AvengeMedia:/dms/Debian_Unstable/Release.key
-sudo curl --fail --location --retry 3 \
-    --output /etc/apt/keyrings/avengemedia-danklinux.asc \
-    https://download.opensuse.org/repositories/home:/AvengeMedia:/danklinux/Debian_Unstable/Release.key
-
-sudo tee /etc/apt/sources.list.d/avengemedia-dms.sources >/dev/null <<'EOF'
-Types: deb
-URIs: https://download.opensuse.org/repositories/home:/AvengeMedia:/dms/Debian_Unstable/
-Suites: /
-Signed-By: /etc/apt/keyrings/avengemedia-dms.asc
-EOF
-sudo tee /etc/apt/sources.list.d/avengemedia-danklinux.sources >/dev/null <<'EOF'
-Types: deb
-URIs: https://download.opensuse.org/repositories/home:/AvengeMedia:/danklinux/Debian_Unstable/
-Suites: /
-Signed-By: /etc/apt/keyrings/avengemedia-danklinux.asc
-EOF
+    ca-certificates software-properties-common
+sudo add-apt-repository -y ppa:avengemedia/dms
+sudo add-apt-repository -y ppa:avengemedia/danklinux
 
 sudo env DEBIAN_FRONTEND=noninteractive apt-get update
-# Install the locally built compositor stack and the complete set of official
-# Hyprland session components used by a normal DMS/Hyprland desktop. DMS is not
-# carried in the artifact: the metapackage dependency resolves dms itself, and
-# its complete runtime closure, from the AvengeMedia repositories above.  Match
-# DMS's Debian installer defaults too: Ghostty is its default terminal; git,
+for ubuntu_ppa_package in dms quickshell; do
+    if ! apt-cache policy "$ubuntu_ppa_package" | grep -Fq 'ppa.launchpadcontent.net/avengemedia/'; then
+        echo "install-anland-desktop: $ubuntu_ppa_package is not available from the AvengeMedia Ubuntu PPA" >&2
+        exit 2
+    fi
+done
+# Install the locally built compositor stack and the complete set of Ubuntu
+# DMS session components. The explicit dms/quickshell packages ensure that the
+# launcher can start the shell instead of silently falling back to compositor
+# only. Match DMS's defaults too: Ghostty is optional; git,
 # AccountsService and the GTK portal are its standard desktop prerequisites.
 # Only artifacts produced by this test tree are reinstalled.  Repository packages
 # must retain apt's normal upgrade/dependency resolution behaviour.
-sudo env DEBIAN_FRONTEND=noninteractive apt-get reinstall -y --allow-downgrades \
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades \
+    "$hyprutils_deb" \
+    "$hyprutils_dev_deb" \
+    "$hyprgraphics_deb" \
+    "$hyprgraphics_dev_deb" \
     "$aquamarine_deb" \
     "$hyprland_deb" \
     "$xwayland_deb" \
     "$desktop_deb"
 sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    dms \
+    quickshell \
+    matugen \
+    danksearch \
     hypridle \
     hyprlock \
     hyprpaper \
     hyprpicker \
     hyprpolkitagent \
-    hyprsunset \
     xdg-desktop-portal-hyprland \
     xdg-desktop-portal-gtk \
-    hyprland-guiutils \
     git \
     kitty \
     alacritty \
@@ -101,13 +116,28 @@ sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     pipewire \
     pipewire-pulse \
     wireplumber \
-    pulseaudio-utils
+    pulseaudio-utils \
+    python3
 
-# Ghostty is DMS's Debian default terminal.  The DMS repository can temporarily
-# require a newer libc/GTK than this stable rootfs; keep that incompatibility
-# non-fatal so the compatible terminal fallbacks above are always installed.
+# Ghostty is DMS's default terminal. Keep it optional so Kitty/Alacritty remain
+# available if the PPA has not published a compatible ARM64 build yet.
 if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ghostty; then
     echo "install-anland-desktop: Ghostty is unavailable for this rootfs; Kitty and Alacritty were installed instead." >&2
+fi
+
+for required_command in dms; do
+    if ! command -v "$required_command" >/dev/null 2>&1; then
+        echo "install-anland-desktop: $required_command is missing after Ubuntu PPA installation" >&2
+        exit 2
+    fi
+done
+if ! command -v quickshell >/dev/null 2>&1 && ! command -v qs >/dev/null 2>&1; then
+    echo "install-anland-desktop: Quickshell is missing after Ubuntu PPA installation" >&2
+    exit 2
+fi
+if ! dms --help >/dev/null 2>&1; then
+    echo "install-anland-desktop: the installed DMS binary failed its startup check" >&2
+    exit 2
 fi
 
 # DMS defaults for the Anland tablet profile.

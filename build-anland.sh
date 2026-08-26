@@ -15,34 +15,38 @@ if [ ! -f "$root/debian/control" ] || [ ! -f "$root/aquamarine-0.14.0/debian/con
     exit 2
 fi
 
-# Install the complete Debian forky dependency set unless explicitly skipped.
-# Other configured suites are allowed; at least one forky source must be present.
+distro_id=""
+distro_codename=""
+if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    distro_id=${ID:-}
+    distro_codename=${VERSION_CODENAME:-}
+fi
+if [ "$distro_id" != ubuntu ] || [ "$distro_codename" != resolute ]; then
+    echo "build-anland: Ubuntu 26.04 (resolute) is required; refusing another distribution" >&2
+    exit 2
+fi
+if grep -RqsE '(^|[[:space:]/])debian([./:]|$)|Debian_Unstable|Suites:[[:space:]]*forky' \
+        /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+    echo "build-anland: Debian/forky APT sources detected; refusing mixed dependencies" >&2
+    exit 2
+fi
+
+# Install the dependency set unless explicitly skipped. This builder is
+# intentionally Ubuntu-only: the target is the Ubuntu 26.04/resolute
+# Droidspaces rootfs and no Debian/unstable dependency is permitted.
 # Set ANLAND_SKIP_DEPS=1 only when dependencies are already installed.
 if [ "${ANLAND_SKIP_DEPS:-0}" != 1 ]; then
-    if ! grep -RqsE '^[[:space:]]*Suites:[[:space:]].*\bforky\b|^[[:space:]]*deb[[:space:]].*\bforky\b' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
-        cat >&2 <<'EOF'
-build-anland: no Debian forky APT source was found.
-
-This build needs packages provided by forky, such as the Hyprland ecosystem
-libraries and GCC 16. Add a forky source, then run this script again. Example:
-
-  deb http://deb.debian.org/debian forky main contrib
-
-You may keep your existing sources; this script only requires that at least one
-active source contains "forky". Run "sudo apt-get update" after editing APT
-sources.
-EOF
-        exit 2
-    fi
     export DEBIAN_FRONTEND=noninteractive
     sudo apt-get update
     sudo apt-get install -y --no-install-recommends \
-        build-essential ca-certificates ccache cmake cpio curl debhelper-compat devscripts meson ninja-build quilt \
+        build-essential ca-certificates ccache cmake cpio curl debhelper devscripts meson ninja-build quilt \
         dpkg-dev fakeroot g++-16 git pkg-config pkgconf hwdata \
         hyprland-protocols hyprwayland-scanner hyprwire-scanner \
         libcairo-dev libdisplay-info-dev libdrm-dev libegl-dev libegl1-mesa-dev \
-        libgbm-dev libgles-dev libglaze-dev libhyprcursor-dev libhyprgraphics-dev \
-        libhyprlang-dev libhyprutils-dev libhyprwire-dev libinput-dev liblcms2-dev libglm-dev \
+        libgbm-dev libgles-dev libglaze-dev libhyprcursor-dev \
+        libjpeg-dev libwebp-dev libmagic-dev librsvg2-dev \
+        libhyprlang-dev libhyprwire-dev libinput-dev liblcms2-dev libglm-dev \
         liblua5.5-dev libmuparser-dev libpango1.0-dev libpixman-1-dev \
         libpipewire-0.3-dev libspa-0.2-dev libseat-dev libeis-dev libre2-dev libssl-dev \
         libsdbus-c++-dev libtomlplusplus-dev libudev-dev libudis86-dev libwayland-dev libxkbcommon-dev \
@@ -198,6 +202,105 @@ fi
 
 cp -a "$root/." "$stage/"
 
+# Ubuntu 26.04 currently ships older Hypr* development libraries than this
+# fork requires (notably hyprutils 0.11 and hyprgraphics 0.5.0). Build the
+# required ABI-matched libraries from their upstream tags and package them as
+# Ubuntu-native .debs. This avoids lowering CMake requirements or mixing in
+# Debian/unstable libraries.
+build_ubuntu_hypr_dep() {
+    dep_name=$1
+    dep_repo=$2
+    dep_commit=$3
+    dep_version=$4
+    runtime_pkg=$5
+    dev_pkg=$6
+    shlibs_name=$7
+    shlibs_soversion=$8
+    dep_src="$stage/ubuntu-deps/$dep_name"
+    dep_install="$stage/ubuntu-deps/${dep_name}-install"
+    dep_runtime="$stage/ubuntu-deps/${runtime_pkg}"
+    dep_devel="$stage/ubuntu-deps/${dev_pkg}"
+    mkdir -p "$stage/ubuntu-deps"
+    if [ ! -d "$dep_src/.git" ]; then
+        git init "$dep_src"
+        git -C "$dep_src" remote add origin "$dep_repo"
+        git -C "$dep_src" fetch --depth=1 origin "$dep_commit"
+        git -C "$dep_src" checkout --detach FETCH_HEAD
+    fi
+    [ "$(git -C "$dep_src" rev-parse HEAD)" = "$dep_commit" ] || {
+        echo "build-anland: $dep_name source commit mismatch" >&2
+        exit 2
+    }
+    rm -rf "$dep_install" "$dep_runtime" "$dep_devel"
+    cmake -S "$dep_src" -B "$dep_src/build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_INSTALL_LIBDIR="lib/$multiarch" \
+        -DBUILD_TESTING=OFF
+    cmake --build "$dep_src/build" --parallel "$(nproc)"
+    DESTDIR="$dep_install" cmake --install "$dep_src/build"
+    mkdir -p "$dep_runtime/DEBIAN" "$dep_devel/DEBIAN"
+    runtime_binary=$(find "$dep_install/usr/lib" -type f -name "lib${shlibs_name}.so.*" -print | head -n 1)
+    [ -n "$runtime_binary" ] || {
+        echo "build-anland: no runtime library found for $dep_name" >&2
+        exit 2
+    }
+    runtime_depends=$(cd "$stage" && dpkg-shlibdeps -O -e"$runtime_binary" | sed -n 's/^shlibs:Depends=//p')
+    [ -n "$runtime_depends" ] || {
+        echo "build-anland: failed to resolve Ubuntu runtime dependencies for $dep_name" >&2
+        exit 2
+    }
+    printf '%s\n' \
+        "Package: $runtime_pkg" \
+        "Version: ${dep_version}-1ubuntu26.04" \
+        "Section: libs" \
+        "Priority: optional" \
+        "Architecture: $deb_arch" \
+        "Depends: $runtime_depends" \
+        "Maintainer: Anland Hyprland maintainers" \
+        "Description: Ubuntu-native $dep_name runtime for Anland Hyprland" \
+        > "$dep_runtime/DEBIAN/control"
+    printf '%s\n' \
+        "Package: $dev_pkg" \
+        "Version: ${dep_version}-1ubuntu26.04" \
+        "Section: libdevel" \
+        "Priority: optional" \
+        "Architecture: $deb_arch" \
+        "Depends: $runtime_pkg (= ${dep_version}-1ubuntu26.04)" \
+        "Maintainer: Anland Hyprland maintainers" \
+        "Description: Ubuntu-native $dep_name development files" \
+        > "$dep_devel/DEBIAN/control"
+    printf '%s\n' "$shlibs_name $shlibs_soversion $runtime_pkg (>= ${dep_version}-1ubuntu26.04)" \
+        > "$dep_runtime/DEBIAN/shlibs"
+    printf '%s\n' '#!/bin/sh' 'set -e' 'ldconfig' > "$dep_runtime/DEBIAN/postinst"
+    printf '%s\n' '#!/bin/sh' 'set -e' 'ldconfig' > "$dep_runtime/DEBIAN/postrm"
+    chmod 0755 "$dep_runtime/DEBIAN/postinst" "$dep_runtime/DEBIAN/postrm"
+    # Runtime SONAME files stay in the runtime package; headers, pkg-config,
+    # CMake metadata and unversioned linker symlinks go to the dev package.
+    mkdir -p "$dep_runtime/usr" "$dep_devel/usr"
+    if [ -d "$dep_install/usr/lib" ]; then
+        mkdir -p "$dep_runtime/usr/lib" "$dep_devel/usr/lib"
+        (cd "$dep_install" && find usr/lib -type f -name '*.so.*' -exec cp -a --parents {} "$dep_runtime" \;)
+        (cd "$dep_install" && find usr/lib -type l -name '*.so.*' -exec cp -a --parents {} "$dep_runtime" \;)
+        (cd "$dep_install" && find usr/lib \( -type f -o -type l \) \! -name '*.so.*' -exec cp -a --parents {} "$dep_devel" \;)
+    fi
+    if [ -d "$dep_install/usr/include" ]; then cp -a "$dep_install/usr/include" "$dep_devel/usr/"; fi
+    if [ -d "$dep_install/usr/share" ]; then cp -a "$dep_install/usr/share" "$dep_devel/usr/"; fi
+    dpkg-deb --build --root-owner-group "$dep_runtime" \
+        "$stage/${runtime_pkg}_${dep_version}-1ubuntu26.04_${deb_arch}.deb"
+    dpkg-deb --build --root-owner-group "$dep_devel" \
+        "$stage/${dev_pkg}_${dep_version}-1ubuntu26.04_${deb_arch}.deb"
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades \
+        "$stage/${runtime_pkg}_${dep_version}-1ubuntu26.04_${deb_arch}.deb" \
+        "$stage/${dev_pkg}_${dep_version}-1ubuntu26.04_${deb_arch}.deb"
+}
+
+export PKG_CONFIG_PATH="$stage/ubuntu-deps/hyprutils-install/usr/lib/$multiarch/pkgconfig:$stage/ubuntu-deps/hyprgraphics-install/usr/lib/$multiarch/pkgconfig:${PKG_CONFIG_PATH:-}"
+build_ubuntu_hypr_dep hyprutils https://github.com/hyprwm/hyprutils.git \
+    5f03477ab3a005ff27c527486f551883535aea2f 0.14.0 libhyprutils13 libhyprutils-dev hyprutils 13
+build_ubuntu_hypr_dep hyprgraphics https://github.com/hyprwm/hyprgraphics.git \
+    482d4b7ec36ffdaf3573086aa586b178fd5404be 0.5.1 libhyprgraphics4 libhyprgraphics-dev hyprgraphics 4
+
 # Aquamarine and Hyprgrass are vendored as clean source baselines in this
 # repository. Their Anland/Lua adaptation is applied only to this disposable
 # native staging copy by the Debian quilt series below.
@@ -252,7 +355,7 @@ sudo apt-get install -y --allow-downgrades "$stage"/libaquamarine13_*.deb "$stag
 
 )
 
-# Retain only the required runtime packages.  Background, debug and development
+# Retain only the required runtime packages. Background, debug and development
 # packages are deliberately left in the temporary build directory and removed on exit.
 # Hyprgrass is compiled during the Hyprland Debian install phase and is therefore
 # embedded in hyprland_<version>_<arch>.deb, never delivered as a loose plugin.
@@ -275,8 +378,12 @@ copy_one_deb() {
 copy_one_deb "hyprland_*_${deb_arch}.deb"
 copy_one_deb "hyprland-anland-desktop_*_${deb_arch}.deb"
 copy_one_deb "libaquamarine13_*_${deb_arch}.deb"
+copy_one_deb "libhyprutils13_*_${deb_arch}.deb"
+copy_one_deb "libhyprutils-dev_*_${deb_arch}.deb"
+copy_one_deb "libhyprgraphics4_*_${deb_arch}.deb"
+copy_one_deb "libhyprgraphics-dev_*_${deb_arch}.deb"
 # DMS is installed by install-anland-desktop.sh from its official APT source.
-# Keep the build artifact focused on the locally built Debian packages.
+# Keep the build artifact focused on the locally built Ubuntu packages (.deb).
 # Xwayland needs the matching kgsl/turnip patch for X11 clients to use the
 # Android GPU path. It is a separate Debian source package, built by the same
 # apt-source/build-dep/patch/dpkg-buildpackage flow as anland-main's producer.

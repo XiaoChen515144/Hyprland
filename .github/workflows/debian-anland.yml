@@ -1,11 +1,11 @@
-name: Build Debian Anland packages
+name: Build Ubuntu Anland packages
 on:
   push:
   pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: debian-anland-${{ github.workflow }}-${{ github.ref }}
+  group: ubuntu-anland-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Aquamarine 0.14 and Hyprland 0.56.2 arm64 Debian packages
+    name: Build Aquamarine 0.14 and Hyprland 0.56.2 arm64 Ubuntu packages
     runs-on: ubuntu-24.04-arm
     env:
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
@@ -23,7 +23,7 @@ jobs:
       CCACHE_MAXSIZE: 2G
       DEB_BUILD_OPTIONS: nocheck
     container:
-      image: debian:forky
+      image: ubuntu:26.04
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
@@ -38,28 +38,28 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential ca-certificates ccache cmake cpio curl debhelper-compat meson ninja-build \
+            build-essential ca-certificates ccache cmake cpio curl debhelper meson ninja-build \
             devscripts dpkg-dev fakeroot g++-16 git pkg-config pkgconf quilt sudo hwdata \
             hyprland-protocols hyprwayland-scanner hyprwire-scanner \
-            libcairo-dev libdisplay-info-dev libdrm-dev libegl-dev \
+            libcairo-dev libdisplay-info-dev libdrm-dev libegl-dev libjpeg-dev libwebp-dev libmagic-dev librsvg2-dev \
             libegl1-mesa-dev libgbm-dev libgles-dev libglaze-dev \
-            libhyprcursor-dev libhyprgraphics-dev libhyprlang-dev \
-            libhyprutils-dev libhyprwire-dev libinput-dev liblcms2-dev libglm-dev \
+            libhyprcursor-dev libhyprlang-dev \
+            libhyprwire-dev libinput-dev liblcms2-dev libglm-dev \
             liblua5.5-dev libmuparser-dev libpango1.0-dev libpixman-1-dev \
             libpipewire-0.3-dev libspa-0.2-dev libseat-dev libeis-dev libre2-dev \
             libsdbus-c++-dev libssl-dev libtomlplusplus-dev libudev-dev libudis86-dev \
             libwayland-dev libxkbcommon-dev libxcb1-dev libxcb-render0-dev \
             libxcb-xfixes0-dev libxcb-icccm4-dev libxcb-composite0-dev \
             libxcb-res0-dev libxcb-errors-dev libxcursor-dev glslang-dev \
-            glslang-tools wayland-protocols xwayland xxd
+            glslang-tools wayland-protocols xwayland xxd software-properties-common
 
       - name: Restore compiler cache
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-hyprland-${{ runner.os }}-${{ runner.arch }}-forky-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-hyprland-${{ runner.os }}-${{ runner.arch }}-ubuntu26-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-hyprland-${{ runner.os }}-${{ runner.arch }}-forky-
+            ccache-hyprland-${{ runner.os }}-${{ runner.arch }}-ubuntu26-
 
       - name: Configure compiler cache
         run: |
@@ -94,25 +94,27 @@ jobs:
         if: always()
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-hyprland-${{ runner.os }}-${{ runner.arch }}-forky-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-hyprland-${{ runner.os }}-${{ runner.arch }}-ubuntu26-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Verify packages and checksums
+      - name: Verify Ubuntu packages and checksums
         run: |
           host_arch=$(dpkg --print-architecture)
           test "$host_arch" = arm64
           test "$(find artifacts -maxdepth 1 -type f -name "hyprland_*_${host_arch}.deb" | wc -l)" -eq 1
           test "$(find artifacts -maxdepth 1 -type f -name "hyprland-anland-desktop_*_${host_arch}.deb" | wc -l)" -eq 1
           test "$(find artifacts -maxdepth 1 -type f -name "libaquamarine13_*_${host_arch}.deb" | wc -l)" -eq 1
+          test "$(find artifacts -maxdepth 1 -type f -name "libhyprutils13_*_${host_arch}.deb" | wc -l)" -eq 1
+          test "$(find artifacts -maxdepth 1 -type f -name "libhyprgraphics4_*_${host_arch}.deb" | wc -l)" -eq 1
           test "$(find artifacts -maxdepth 1 -type f -name "xwayland_*_${host_arch}.deb" | wc -l)" -ge 1
           hyprland_deb=$(find artifacts -maxdepth 1 -type f -name "hyprland_*_${host_arch}.deb" ! -name '*anland*')
           dpkg-deb -c "$hyprland_deb" | grep -F "/usr/lib/aarch64-linux-gnu/hyprland/plugins/libhyprgrass.so"
           test -x artifacts/install-anland-desktop.sh
           (cd artifacts && sha256sum -c SHA256SUMS)
 
-      - name: Upload Debian packages
+      - name: Upload Ubuntu packages
         uses: actions/upload-artifact@v4
         with:
-          name: anland-debian-packages-arm64
+          name: anland-ubuntu-packages-arm64
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -120,6 +122,10 @@ jobs:
             artifacts/hyprland_*_arm64.deb
             artifacts/hyprland-anland-desktop_*_arm64.deb
             artifacts/libaquamarine13_*_arm64.deb
+            artifacts/libhyprutils13_*_arm64.deb
+            artifacts/libhyprutils-dev_*_arm64.deb
+            artifacts/libhyprgraphics4_*_arm64.deb
+            artifacts/libhyprgraphics-dev_*_arm64.deb
             artifacts/xwayland_*_arm64.deb
             artifacts/install-anland-desktop.sh
             artifacts/SHA256SUMS
